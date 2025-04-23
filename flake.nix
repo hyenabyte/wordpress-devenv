@@ -31,32 +31,34 @@
               inherit inputs pkgs;
               modules =
                 let
-                  projectRoot = "./projects";
+                  projectsPath = "./projects";
+                  assetsPath = "./assets";
+
                   wpVersion = "latest";
 
-                  projectName = "proj3dzonen";
-                  projectUrl = "${projectName}.localhost";
-                  # WIP: multiple sites support
+                  adminUser = "admin";
+                  adminPassword = "password";
 
+                  db = {
+                    adminUser = "admin";
+                    adminPassword = "admin";
+
+                    wordpressUser = "wordpress";
+                    wordpressPassword = "wordpress";
+                  };
 
                   pages = [
                     {
-                      name = "3Dzonen";
-                      url = "proj3dzonen.localhost";
-                      path = "proj3dzonen";
-                      db = "proj3dzonen";
-                    }
-                    {
-                      name = "Naturmissionen";
-                      url = "naturmissionen.localhost";
-                      path = "naturmissionen";
-                      db = "naturmissionen";
+                      name = "WP Example";
+                      url = "example.localhost";
+                      path = "example";
+                      db = "example";
                     }
                   ];
 
                 in
                 [
-                  ({ pkgs, config, ... }: {
+                  ({ pkgs, config, lib, ... }: {
                     packages = with pkgs;
                       [
                         git
@@ -92,10 +94,10 @@
                     };
 
                     certificates = [
-                      "${projectUrl}"
-                      "naturmissionen.localhost"
-                    ];
-
+                      "localhost"
+                      "adminer.localhost"
+                      "mailhog.localhost"
+                    ] ++ builtins.foldl' (acc: page: acc ++ [ page.url ]) [ ] pages;
 
                     scripts.build-css.exec = ''
                     '';
@@ -104,33 +106,65 @@
                       sudo setcap 'cap_net_bind_service=+ep' ${pkgs.caddy}/bin/caddy
                     '';
 
-                    scripts.setup-page.exec = ''
-                      echo "TODO"
-                      wp core download --skip-content --version=${wpVersion} --path=./assets/wordpress
+                    scripts.new.exec = ''
+                      if [ -d ${projectsPath}/$1 ]; then
+                        echo "Directory already exists"
+                        exit 1
+                      fi
+                    
+                      # Download Wordpress unless it is already downloaded
+                      if [ ! -d ${assetsPath}/wordpress/${wpVersion} ]; then
+                        mkdir -p ${assetsPath}/wordpress/${wpVersion}
+                        ${pkgs.wp-cli}/bin/wp core download --skip-content --version=${wpVersion} --path=${assetsPath}/wordpress/${wpVersion}
+                      fi
+
+                      # Force redownload the latest version of wordpress
+                      # if [ -d ${assetsPath}/wordpress/${wpVersion} && ${wpVersion} == "latest" ]; then
+                      # WIP
+                      # fi
+
+                      # Copy Wordpress to new project folder
+                      cp -r ${assetsPath}/wordpress/${wpVersion} ${projectsPath}/$1
+                      # cd ${projectsPath}/$1
                     '';
 
                     services = {
-                      caddy = {
-                        enable = true;
-                        virtualHosts = {
-                          "naturmissionen.localhost" = {
-                            extraConfig = ''
-                              tls ${config.env.DEVENV_STATE}/mkcert/naturmissionen.localhost.pem ${config.env.DEVENV_STATE}/mkcert/naturmissionen.localhost-key.pem
-                              root * ${projectRoot}/reepark-naturmissionen
-                              php_fastcgi unix/${config.languages.php.fpm.pools.web.socket}
-                              file_server
-                            '';
-                          };
-                          "${projectName}.localhost" = {
-                            extraConfig = ''
-                              tls ${config.env.DEVENV_STATE}/mkcert/${projectUrl}.pem ${config.env.DEVENV_STATE}/mkcert/${projectUrl}-key.pem
-                              root * ${projectRoot}/${projectName}
-                              php_fastcgi unix/${config.languages.php.fpm.pools.web.socket}
-                              file_server
-                            '';
-                          };
+                      caddy =
+                        let
+                          # TODO: figure out a better solution to cert names
+                          certNameCount = (builtins.foldl' (acc: cert: acc + 1) 0 config.certificates) - 1;
+                          certName = "localhost+${builtins.toString certNameCount}";
+                          mapVirtualHosts = list: builtins.foldl'
+                            (acc: page: acc // {
+                              "${page.url}" = {
+                                extraConfig = ''
+                                  tls ${config.env.DEVENV_STATE}/mkcert/${certName}.pem ${config.env.DEVENV_STATE}/mkcert/${certName}-key.pem
+                                  root * ${projectsPath}/${page.path}
+                                  php_fastcgi unix/${config.languages.php.fpm.pools.web.socket}
+                                  file_server
+                                '';
+                              };
+                            })
+                            { }
+                            list;
+                        in
+                        {
+                          enable = true;
+                          virtualHosts = {
+                            "adminer.localhost" = {
+                              extraConfig = ''
+                                tls ${config.env.DEVENV_STATE}/mkcert/${certName}.pem ${config.env.DEVENV_STATE}/mkcert/${certName}-key.pem
+                                reverse_proxy localhost:8080
+                              '';
+                            };
+                            "mailhog.localhost" = {
+                              extraConfig = ''
+                                tls ${config.env.DEVENV_STATE}/mkcert/${certName}.pem ${config.env.DEVENV_STATE}/mkcert/${certName}-key.pem
+                                reverse_proxy localhost:8025
+                              '';
+                            };
+                          } // mapVirtualHosts pages;
                         };
-                      };
 
                       redis.enable = true;
                       adminer.enable = true;
@@ -140,22 +174,23 @@
                         settings.mysqld = {
                           max_allowed_packet = "1024M";
                         };
-                        initialDatabases = [{ name = "${projectName}"; } { name = "naturmissionen"; }];
+                        initialDatabases = [ ] ++ builtins.foldl' (acc: page: acc ++ [{ name = "${page.db}"; }]) [ ] pages;
                         ensureUsers = [
                           {
-                            name = "admin";
-                            password = "admin";
+                            name = db.adminUser;
+                            password = db.adminPassword;
                             ensurePermissions = {
                               "*.*" = "ALL PRIVILEGES";
                             };
                           }
                           {
-                            name = "wordpress";
-                            password = "wordpress";
-                            ensurePermissions = {
-                              "naturmissionen.*" = "ALL PRIVILEGES";
-                              "${projectName}.*" = "ALL PRIVILEGES";
-                            };
+                            name = db.wordpressUser;
+                            password = db.wordpressPassword;
+                            ensurePermissions =
+                              let
+                                mapPermissions = list: builtins.foldl' (acc: page: acc // { "${page.db}.*" = "ALL PRIVILEGES"; }) { } list;
+                              in
+                              { } // mapPermissions pages;
                           }
                         ];
                       };
