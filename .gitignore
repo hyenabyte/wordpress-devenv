@@ -1,0 +1,11 @@
+.devenv
+.direnv
+
+projects/*
+assets/*
+!projects/.keep
+!assets/.keep
+
+.helix/
+
+.DS_Store
