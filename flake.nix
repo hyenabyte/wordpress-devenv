@@ -38,6 +38,7 @@
 
                   adminUser = "admin";
                   adminPassword = "password";
+                  adminEmail = "mail@example.com";
 
                   db = {
                     adminUser = "admin";
@@ -63,8 +64,13 @@
                       [
                         git
                         wp-cli
+
                         phpactor
+
                         dart-sass
+                        lightningcss
+
+                        tailspin
                       ];
 
                     languages.javascript.enable = true;
@@ -99,9 +105,6 @@
                       "mailhog.localhost"
                     ] ++ builtins.foldl' (acc: page: acc ++ [ page.url ]) [ ] pages;
 
-                    scripts.build-css.exec = ''
-                    '';
-
                     scripts.caddy-setcap.exec = ''
                       sudo setcap 'cap_net_bind_service=+ep' ${pkgs.caddy}/bin/caddy
                     '';
@@ -125,7 +128,69 @@
 
                       # Copy Wordpress to new project folder
                       cp -r ${assetsPath}/wordpress/${wpVersion} ${projectsPath}/$1
-                      # cd ${projectsPath}/$1
+
+                      # Setup wp-config
+                      ${pkgs.wp-cli}/bin/wp config create \
+                        --path=${projectsPath}/$1 \
+                        --skip-check \
+                        --dbhost=0.0.0.0:3306 \
+                        --dbname=$1 \
+                        --dbuser=${db.wordpressUser} \
+                        --dbpass=${db.wordpressPassword}
+
+                      # TODO add debug and mailtrap settings to wp-config
+
+                      echo "New wordpress project installed to ${projectsPath}/$1"
+                    '';
+
+                    scripts.install.exec = ''
+                      # Install core
+                      ${pkgs.wp-cli}/bin/wp core install \
+                        --path=${projectsPath}/$1 \
+                        --url=$1.localhost \
+                        --title=$1 \
+                        --admin_user=${adminUser} \
+                        --admin_password=${adminPassword} \
+                        --admin_email=${adminEmail}
+
+                      # Install mailhog plugin
+                      wp plugin install https://github.com/tareq1988/mailhog-for-wp/archive/refs/heads/master.zip \
+                        --path=${projectsPath}/$1 \
+                        --force \
+                        --activate
+
+                      # Install all plugins from the plugins folder
+                      if [ -d ${assetsPath}/plugins ]; then
+                        for filename in ${assetsPath}/plugins/*.zip; do
+                          wp plugin install "$filename" \
+                            --path=${projectsPath}/$1 \
+                            --activate
+                        done
+                      fi
+
+                      # Install all themes from theme folder
+                      if [ -d ${assetsPath}/themes ]; then
+                        for filename in ${assetsPath}/themes/*.zip; do
+                          wp theme install "$filename" \
+                            --path=${projectsPath}/$1
+                        done
+                      fi
+
+                      echo "WordPress installed"
+                      echo ""
+                      echo "https://$1.localhost/wp-admin"
+                      echo "User: ${adminUser}"
+                      echo "Password: ${adminPassword}"
+                    '';
+
+                    scripts.watch-css.exec = ''
+                      ${pkgs.dart-sass}/bin/sass -w $1
+                    '';
+
+                    scripts.build-css.exec = ''
+                      ${pkgs.dart-sass}/bin/sass --no-source-map $1
+                      # WIP
+                      ${pkgs.lightningcss}/bin/lightningcss --minify --bundle --targets \">= 0.25%\" input.css -o output.css
                     '';
 
                     services = {
